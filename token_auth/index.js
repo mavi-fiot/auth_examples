@@ -1,137 +1,82 @@
-const uuid = require('uuid');
 const express = require('express');
-const onFinished = require('on-finished');
-const bodyParser = require('body-parser');
-const path = require('path');
-const port = 3000;
-const fs = require('fs');
+const fetch = require('node-fetch');
+require('dotenv').config();
+const cors = require('cors');
 
 const app = express();
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(cors());
 
-const SESSION_KEY = 'Authorization';
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
+const AUDIENCE = `https://${AUTH0_DOMAIN}/api/v2/`;
 
-class Session {
-    #sessions = {}
+// 🔹 Авторизація (отримання access_token через password grant type)
+app.post('/api/login', async (req, res) => {
+    console.log("🔹 /api/login викликано");
+    const { email, password } = req.body;
+    console.log("🔹 Отримано email:", email);
 
-    constructor() {
-        try {
-            this.#sessions = fs.readFileSync('./sessions.json', 'utf8');
-            this.#sessions = JSON.parse(this.#sessions.trim());
+    try {
+        const response = await fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                grant_type: "password",
+                client_id: CLIENT_ID,
+                client_secret: CLIENT_SECRET,
+                username: email,
+                password: password,
+                audience: AUDIENCE,
+                scope: "openid profile email",
+                default_directory: process.env.AUTH0_CONNECTION
+            })
+        });
 
-            console.log(this.#sessions);
-        } catch(e) {
-            this.#sessions = {};
-        }
+        console.log("🔹 Response status:", response.status);
+        const data = await response.json();
+        console.log("🔹 Auth0 Response:", data);
+
+        if (data.error) throw new Error(data.error_description);
+
+        res.json(data);
+    } catch (error) {
+        console.error("🔹 Auth0 Error:", error.message);
+        res.status(400).json({ error: error.message });
     }
-
-    #storeSessions() {
-        fs.writeFileSync('./sessions.json', JSON.stringify(this.#sessions), 'utf-8');
-    }
-
-    set(key, value) {
-        if (!value) {
-            value = {};
-        }
-        this.#sessions[key] = value;
-        this.#storeSessions();
-    }
-
-    get(key) {
-        return this.#sessions[key];
-    }
-
-    init(res) {
-        const sessionId = uuid.v4();
-        this.set(sessionId);
-
-        return sessionId;
-    }
-
-    destroy(req, res) {
-        const sessionId = req.sessionId;
-        delete this.#sessions[sessionId];
-        this.#storeSessions();
-    }
-}
-
-const sessions = new Session();
-
-app.use((req, res, next) => {
-    let currentSession = {};
-    let sessionId = req.get(SESSION_KEY);
-
-    if (sessionId) {
-        currentSession = sessions.get(sessionId);
-        if (!currentSession) {
-            currentSession = {};
-            sessionId = sessions.init(res);
-        }
-    } else {
-        sessionId = sessions.init(res);
-    }
-
-    req.session = currentSession;
-    req.sessionId = sessionId;
-
-    onFinished(req, () => {
-        const currentSession = req.session;
-        const sessionId = req.sessionId;
-        sessions.set(sessionId, currentSession);
-    });
-
-    next();
 });
 
-app.get('/', (req, res) => {
-    if (req.session.username) {
-        return res.json({
-            username: req.session.username,
-            logout: 'http://localhost:3000/logout'
-        })
+// 🔹 Отримання інформації про користувача
+app.get('/api/userinfo', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Unauthorized' });
     }
-    res.sendFile(path.join(__dirname+'/index.html'));
-})
 
-app.get('/logout', (req, res) => {
-    sessions.destroy(req, res);
-    res.redirect('/');
+    const token = authHeader.split(' ')[1];
+    console.log("🔹 Token received:", token);
+
+    try {
+        const userResponse = await fetch(`https://${AUTH0_DOMAIN}/userinfo`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+
+        console.log("🔹 UserInfo Response Status:", userResponse.status);
+        if (!userResponse.ok) throw new Error('Invalid token');
+
+        const user = await userResponse.json();
+        res.json(user);
+    } catch (error) {
+        console.error("🔹 Access denied:", error.message);
+        res.status(403).json({ error: 'Access denied', details: error.message });
+    }
 });
+console.log("🔹 AUTH0_DOMAIN:", process.env.AUTH0_DOMAIN);
+console.log("🔹 CLIENT_ID:", process.env.CLIENT_ID);
+console.log("🔹 CLIENT_SECRET:", process.env.CLIENT_SECRET);
+console.log("🔹 AUDIENCE:", process.env.AUDIENCE);
+console.log("🔹 CONNECTION:", process.env.AUTH0_CONNECTION);
 
-const users = [
-    {
-        login: 'Login',
-        password: 'Password',
-        username: 'Username',
-    },
-    {
-        login: 'Login1',
-        password: 'Password1',
-        username: 'Username1',
-    }
-]
 
-app.post('/api/login', (req, res) => {
-    const { login, password } = req.body;
-
-    const user = users.find((user) => {
-        if (user.login == login && user.password == password) {
-            return true;
-        }
-        return false
-    });
-
-    if (user) {
-        req.session.username = user.username;
-        req.session.login = user.login;
-
-        res.json({ token: req.sessionId });
-    }
-
-    res.status(401).send();
-});
-
-app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`)
-})
+app.listen(3000, () => console.log('✅ Server running on port 3000'));
